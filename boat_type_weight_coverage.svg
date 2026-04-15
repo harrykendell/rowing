@@ -338,7 +338,9 @@
 <text x="770.0" y="2142.0" class="boat-label" text-anchor="middle" fill="white">Stämpfli</text>
 <line x1="640.0" y1="2162.0" x2="900.0" y2="2162.0" class="interval" stroke="#1e40af" />
 <text x="770.0" y="2166.0" class="boat-label" text-anchor="middle" fill="white">Viridor</text>
-<line x1="770.0" y1="2186.0" x2="1030.0" y2="2186.0" class="interval" stroke="#1e40af" />
+<defs><clipPath id="both-clip-eights-4"><rect x="762.5" y="2178.5" width="275.0" height="15" rx="7.5" ry="7.5" /></clipPath></defs>
+<rect x="762.5" y="2178.5" width="275.0" height="15" rx="7.5" ry="7.5" fill="#0b5d46" />
+<rect x="762.5" y="2186.0" width="275.0" height="7.5" fill="#1e40af" clip-path="url(#both-clip-eights-4)" />
 <text x="900.0" y="2190.0" class="boat-label" text-anchor="middle" fill="white">Beetroot</text>
 <line x1="900.0" y1="2210.0" x2="1160.0" y2="2210.0" class="interval" stroke="#1e40af" />
 <text x="1030.0" y="2214.0" class="boat-label" text-anchor="middle" fill="white">Head Turner</text>

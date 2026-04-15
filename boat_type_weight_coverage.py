@@ -93,6 +93,9 @@ RIGGING_TYPE_OVERRIDES = {
     75: "4x+",  # Inspired by Murphy
     79: "4x+",  # Paula
 }
+RIGGING_OVERRIDES = {
+    82: "both",  # Beetroot
+}
 DROP_REASON_PRIORITY = [
     "private boat",
     "deleted",
@@ -171,7 +174,7 @@ def load_boats(path: Path) -> tuple[list[Boat], list[DroppedBoat]]:
                 name=item["name"],
                 boat_type=boat_type,
                 display_type=BOAT_TYPE_GROUPS[boat_type],
-                rigging=RIGGING_TYPE[boat_type],
+                rigging=RIGGING_OVERRIDES.get(int(item["id"]), RIGGING_TYPE[boat_type]),
                 weight=weight,
                 approval_required=bool(item.get("approval", False)),
                 lower=weight - WEIGHT_TOLERANCE_KG,
