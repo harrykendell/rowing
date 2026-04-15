@@ -6,6 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import shutil
+import subprocess
+import tempfile
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from html import escape
@@ -44,10 +47,14 @@ RIGGING_TYPE = {
     "4x+": "both",
     "8+": "sweep",
 }
-SCULL_COLOR = "#0b5d46"
-SWEEP_COLOR = "#1e40af"
+# Club-themed palette: official green + contrasting secondary green.
+SCULL_COLOR = "#00491e"
+SWEEP_COLOR = "#49a868"
 WEIGHT_TOLERANCE_KG = 5
-BAR_STROKE_WIDTH = 15
+BAR_STROKE_WIDTH = 18
+AXIS_MIN_KG = 50
+JPG_QUALITY_DEFAULT = 95
+JPG_SCALE_DEFAULT = 2.0
 FONT_STACK = "'IBM Plex Sans', 'Helvetica Neue', Arial, sans-serif"
 CLUB_BOAT_COLOR = "#0b5d46"
 APPROVAL_COLOR = "#dc2626"
@@ -57,7 +64,7 @@ SUBTLE_TEXT = "#5b6f66"
 BACKGROUND = "#ffffff"
 PANEL_BACKGROUND = "#fcfbf6"
 PANEL_BORDER = "#8ea79d"
-HEADER_FILL = "#00543c"
+HEADER_FILL = "#00491e"
 HEADER_TEXT = "#f7f5ef"
 ACCENT_GOLD = "#c5a24a"
 RIGGING_TYPE_OVERRIDES = {
@@ -141,6 +148,34 @@ def parse_args() -> argparse.Namespace:
         "--svg-out",
         default="boat_type_weight_coverage.svg",
         help="Path to the SVG file to create.",
+    )
+    parser.add_argument(
+        "--jpg-out",
+        default=None,
+        help="Path to the JPG file to create (defaults to same stem as --svg-out).",
+    )
+    parser.add_argument(
+        "--jpg-quality",
+        type=int,
+        default=JPG_QUALITY_DEFAULT,
+        help=f"JPEG quality (1-100). Default: {JPG_QUALITY_DEFAULT}.",
+    )
+    parser.add_argument(
+        "--jpg-scale",
+        type=float,
+        default=JPG_SCALE_DEFAULT,
+        help=f"Raster scale multiplier before JPG encoding. Default: {JPG_SCALE_DEFAULT}.",
+    )
+    layout_group = parser.add_mutually_exclusive_group(required=True)
+    layout_group.add_argument(
+        "--expanded",
+        action="store_true",
+        help="Render with one boat per row.",
+    )
+    layout_group.add_argument(
+        "--condensed",
+        action="store_true",
+        help="Render by packing non-overlapping boats into shared rows.",
     )
     return parser.parse_args()
 
@@ -226,6 +261,27 @@ def coverage_count(boats: list[Boat], kg: int) -> int:
     return sum(1 for boat in boats if boat.lower <= kg <= boat.upper)
 
 
+def pack_boats_into_rows(boats: list[Boat]) -> list[list[Boat]]:
+    """Pack boats into the highest available row where intervals do not overlap."""
+    rows: list[list[Boat]] = []
+    row_max_upper: list[int] = []
+
+    for boat in boats:
+        placed = False
+        for row_index, max_upper in enumerate(row_max_upper):
+            if boat.lower > max_upper:
+                rows[row_index].append(boat)
+                row_max_upper[row_index] = boat.upper
+                placed = True
+                break
+
+        if not placed:
+            rows.append([boat])
+            row_max_upper.append(boat.upper)
+
+    return rows
+
+
 def make_summary(grouped_boats: dict[str, list[Boat]]) -> list[dict[str, object]]:
     summary: list[dict[str, object]] = []
     for display_type in DISPLAY_BOAT_TYPES:
@@ -286,10 +342,12 @@ def svg_text(
 
 
 def render_svg(
-    grouped_boats: dict[str, list[Boat]], summary: list[dict[str, object]]
-) -> str:
+    grouped_boats: dict[str, list[Boat]],
+    summary: list[dict[str, object]],
+    condensed: bool,
+) -> tuple[str, int, int]:
     non_empty_boats = [boat for boats in grouped_boats.values() for boat in boats]
-    axis_min = 5 * math.floor(min(boat.lower for boat in non_empty_boats) / 5)
+    axis_min = AXIS_MIN_KG
     axis_max = 5 * math.ceil(max(boat.upper for boat in non_empty_boats) / 5)
 
     width = 1800
@@ -304,11 +362,21 @@ def render_svg(
     panel_padding_bottom = 24
     footer_height = 42
 
+    if condensed:
+        rows_by_type = {
+            display_type: pack_boats_into_rows(grouped_boats[display_type])
+            for display_type in DISPLAY_BOAT_TYPES
+        }
+    else:
+        rows_by_type = {
+            display_type: [[boat] for boat in grouped_boats[display_type]]
+            for display_type in DISPLAY_BOAT_TYPES
+        }
     panel_heights = []
     for display_type in DISPLAY_BOAT_TYPES:
-        boat_count = len(grouped_boats[display_type])
+        row_count = len(rows_by_type[display_type])
         panel_heights.append(
-            panel_header + axis_band + (boat_count * row_height) + panel_padding_bottom
+            panel_header + axis_band + (row_count * row_height) + panel_padding_bottom
         )
 
     height = (
@@ -333,8 +401,9 @@ def render_svg(
         .subtitle {{ font: 400 17px {FONT_STACK}; fill: {SUBTLE_TEXT}; }}
         .legend {{ font: 600 14px {FONT_STACK}; fill: {TEXT_COLOR}; }}
         .panel-title {{ font: 800 22px {FONT_STACK}; fill: {HEADER_TEXT}; letter-spacing: 0.6px; }}
+        .panel-count {{ font: 700 18px {FONT_STACK}; fill: {HEADER_TEXT}; }}
         .tick {{ font: 500 12px {FONT_STACK}; fill: {SUBTLE_TEXT}; }}
-        .boat-label {{ font: 500 13px {FONT_STACK}; fill: white; }}
+        .boat-label {{ font: 700 14px {FONT_STACK}; fill: white; stroke: rgba(20, 53, 43, 0.78); stroke-width: 3.4px; stroke-linejoin: round; paint-order: stroke; letter-spacing: 0.15px; }}
         .footer {{ font: 400 14px {FONT_STACK}; fill: {SUBTLE_TEXT}; }}
         .grid {{ stroke: {GRID_COLOR}; stroke-width: 1; }}
         .baseline {{ stroke: {PANEL_BORDER}; stroke-width: 1.25; }}
@@ -364,6 +433,7 @@ def render_svg(
     legend_y = 70
     legend_x = 1260
     legend_both_y = legend_y + 52
+    legend_restricted_y = legend_y + 78
     legend_both_top = legend_both_y - (BAR_STROKE_WIDTH / 2)
     legend_both_left = legend_x - (BAR_STROKE_WIDTH / 2)
     legend_both_width = 34 + BAR_STROKE_WIDTH
@@ -377,21 +447,24 @@ def render_svg(
             svg_text(legend_x + 48, legend_y + 31, "sweep", "legend"),
             "<defs>",
             (
-                f'<clipPath id="legend-both-clip">'
-                f'<rect x="{legend_both_left:.1f}" y="{legend_both_top:.1f}" width="{legend_both_width:.1f}" height="{BAR_STROKE_WIDTH}" '
-                f'rx="{BAR_STROKE_WIDTH / 2}" ry="{BAR_STROKE_WIDTH / 2}" />'
-                "</clipPath>"
+                f'<linearGradient id="legend-both-gradient" x1="0%" y1="100%" x2="100%" y2="0%">'
+                f'<stop offset="50%" stop-color="{SCULL_COLOR}" />'
+                f'<stop offset="50%" stop-color="{SWEEP_COLOR}" />'
+                "</linearGradient>"
             ),
             "</defs>",
             (
                 f'<rect x="{legend_both_left:.1f}" y="{legend_both_top:.1f}" width="{legend_both_width:.1f}" height="{BAR_STROKE_WIDTH}" '
-                f'rx="{BAR_STROKE_WIDTH / 2}" ry="{BAR_STROKE_WIDTH / 2}" fill="{SCULL_COLOR}" />'
-            ),
-            (
-                f'<rect x="{legend_both_left:.1f}" y="{legend_both_y:.1f}" width="{legend_both_width:.1f}" height="{BAR_STROKE_WIDTH / 2}" '
-                f'fill="{SWEEP_COLOR}" clip-path="url(#legend-both-clip)" />'
+                f'rx="{BAR_STROKE_WIDTH / 2}" ry="{BAR_STROKE_WIDTH / 2}" fill="url(#legend-both-gradient)" />'
             ),
             svg_text(legend_x + 48, legend_y + 57, "both", "legend"),
+            f'<circle cx="{legend_x + 17:.1f}" cy="{legend_restricted_y:.1f}" r="5" class="marker" fill="{APPROVAL_COLOR}" />',
+            svg_text(
+                legend_x + 48,
+                legend_restricted_y + 5,
+                "restricted boat",
+                "legend",
+            ),
         ]
     )
 
@@ -401,8 +474,12 @@ def render_svg(
             char if char.isalnum() else "-" for char in display_type.lower()
         ).strip("-")
         boats = grouped_boats[display_type]
+        rows = rows_by_type[display_type]
         panel_height = (
-            panel_header + axis_band + (len(boats) * row_height) + panel_padding_bottom
+            panel_header
+            + axis_band
+            + (len(rows) * row_height)
+            + panel_padding_bottom
         )
         panel_x = 48
         panel_y = current_y
@@ -417,6 +494,16 @@ def render_svg(
         )
 
         svg.append(svg_text(72, panel_y + 36, display_type, "panel-title"))
+        count_label = f"{len(boats)} boat" if len(boats) == 1 else f"{len(boats)} boats"
+        svg.append(
+            svg_text(
+                panel_x + panel_width - 28,
+                panel_y + 36,
+                count_label,
+                "panel-count",
+                anchor="end",
+            )
+        )
 
         axis_top = panel_y + panel_header
         rows_top = axis_top + axis_band + row_height
@@ -433,64 +520,171 @@ def render_svg(
             f'x2="{left_margin + plot_width:.1f}" y2="{axis_top + axis_band:.1f}" class="baseline" />'
         )
 
-        for index, boat in enumerate(boats):
-            y = rows_top + index * row_height
-            label = boat.name
-            if boat.rigging == "scull":
-                color = SCULL_COLOR
-            elif boat.rigging == "sweep":
-                color = SWEEP_COLOR
-            else:  # both
-                color = None
+        for row_index, row_boats in enumerate(rows):
+            y = rows_top + row_index * row_height
+            for boat_index, boat in enumerate(row_boats):
+                label = boat.name
+                if boat.rigging == "scull":
+                    color = SCULL_COLOR
+                elif boat.rigging == "sweep":
+                    color = SWEEP_COLOR
+                else:  # both
+                    color = None
 
-            if boat.rigging == "both":
-                lower_x = x_for_weight(boat.lower)
-                upper_x = x_for_weight(boat.upper)
-                bar_left = lower_x - (BAR_STROKE_WIDTH / 2)
-                bar_width = (upper_x - lower_x) + BAR_STROKE_WIDTH
-                bar_top = y - (BAR_STROKE_WIDTH / 2)
-                clip_id = f"both-clip-{safe_display_type}-{index}"
+                if boat.rigging == "both":
+                    lower_x = x_for_weight(boat.lower)
+                    upper_x = x_for_weight(boat.upper)
+                    bar_left = lower_x - (BAR_STROKE_WIDTH / 2)
+                    bar_width = (upper_x - lower_x) + BAR_STROKE_WIDTH
+                    bar_top = y - (BAR_STROKE_WIDTH / 2)
+                    gradient_id = (
+                        f"both-gradient-{safe_display_type}-{row_index}-{boat_index}"
+                    )
+                    svg.append(
+                        "<defs>"
+                        f'<linearGradient id="{gradient_id}" x1="0%" y1="100%" x2="100%" y2="0%">'
+                        f'<stop offset="50%" stop-color="{SCULL_COLOR}" />'
+                        f'<stop offset="50%" stop-color="{SWEEP_COLOR}" />'
+                        "</linearGradient>"
+                        "</defs>"
+                    )
+                    svg.append(
+                        f'<rect x="{bar_left:.1f}" y="{bar_top:.1f}" width="{bar_width:.1f}" height="{BAR_STROKE_WIDTH}" '
+                        f'rx="{BAR_STROKE_WIDTH / 2}" ry="{BAR_STROKE_WIDTH / 2}" fill="url(#{gradient_id})" />'
+                    )
+                else:
+                    svg.append(
+                        f'<line x1="{x_for_weight(boat.lower):.1f}" y1="{y:.1f}" x2="{x_for_weight(boat.upper):.1f}" '
+                        f'y2="{y:.1f}" class="interval" stroke="{color}" />'
+                    )
+                if boat.approval_required:
+                    svg.append(
+                        f'<circle cx="{x_for_weight(boat.lower):.1f}" cy="{y:.1f}" r="5" class="marker" fill="{APPROVAL_COLOR}" />'
+                    )
+                # Place boat name at stated weight, replacing the marker dot.
                 svg.append(
-                    "<defs>"
-                    f'<clipPath id="{clip_id}">'
-                    f'<rect x="{bar_left:.1f}" y="{bar_top:.1f}" width="{bar_width:.1f}" height="{BAR_STROKE_WIDTH}" '
-                    f'rx="{BAR_STROKE_WIDTH / 2}" ry="{BAR_STROKE_WIDTH / 2}" />'
-                    "</clipPath>"
-                    "</defs>"
+                    svg_text(
+                        x_for_weight(boat.weight),
+                        y + 5,
+                        label,
+                        "boat-label",
+                        anchor="middle",
+                        fill="white",
+                    )
                 )
-                svg.append(
-                    f'<rect x="{bar_left:.1f}" y="{bar_top:.1f}" width="{bar_width:.1f}" height="{BAR_STROKE_WIDTH}" '
-                    f'rx="{BAR_STROKE_WIDTH / 2}" ry="{BAR_STROKE_WIDTH / 2}" fill="{SCULL_COLOR}" />'
-                )
-                svg.append(
-                    f'<rect x="{bar_left:.1f}" y="{y:.1f}" width="{bar_width:.1f}" height="{BAR_STROKE_WIDTH / 2}" '
-                    f'fill="{SWEEP_COLOR}" clip-path="url(#{clip_id})" />'
-                )
-            else:
-                svg.append(
-                    f'<line x1="{x_for_weight(boat.lower):.1f}" y1="{y:.1f}" x2="{x_for_weight(boat.upper):.1f}" '
-                    f'y2="{y:.1f}" class="interval" stroke="{color}" />'
-                )
-            if boat.approval_required:
-                svg.append(
-                    f'<circle cx="{x_for_weight(boat.lower):.1f}" cy="{y:.1f}" r="5" class="marker" fill="{APPROVAL_COLOR}" />'
-                )
-            # Place boat name at stated weight, replacing the marker dot.
-            svg.append(
-                svg_text(
-                    x_for_weight(boat.weight),
-                    y + 4,
-                    label,
-                    "boat-label",
-                    anchor="middle",
-                    fill="white",
-                )
-            )
 
         current_y += panel_height + panel_gap
 
     svg.append("</svg>")
-    return "\n".join(svg)
+    return "\n".join(svg), width, height
+
+
+def render_svg_to_png(
+    svg_path: Path, png_path: Path, width: int, height: int, scale: float
+) -> None:
+    output_width = max(1, int(round(width * scale)))
+    output_height = max(1, int(round(height * scale)))
+
+    try:
+        import cairosvg  # type: ignore
+
+        cairosvg.svg2png(
+            url=str(svg_path),
+            write_to=str(png_path),
+            output_width=output_width,
+            output_height=output_height,
+        )
+        return
+    except ModuleNotFoundError:
+        pass
+
+    rsvg_convert = shutil.which("rsvg-convert")
+    if rsvg_convert:
+        subprocess.run(
+            [
+                rsvg_convert,
+                "-w",
+                str(output_width),
+                "-h",
+                str(output_height),
+                str(svg_path),
+                "-o",
+                str(png_path),
+            ],
+            check=True,
+        )
+        return
+
+    inkscape = shutil.which("inkscape")
+    if inkscape:
+        subprocess.run(
+            [
+                inkscape,
+                str(svg_path),
+                "--export-type=png",
+                f"--export-filename={png_path}",
+                f"--export-width={output_width}",
+                f"--export-height={output_height}",
+            ],
+            check=True,
+        )
+        return
+
+    chrome = (
+        shutil.which("google-chrome")
+        or shutil.which("chromium")
+        or shutil.which("chromium-browser")
+    )
+    if chrome:
+        subprocess.run(
+            [
+                chrome,
+                "--headless",
+                "--disable-gpu",
+                "--no-sandbox",
+                "--hide-scrollbars",
+                f"--screenshot={png_path}",
+                f"--window-size={width},{height}",
+                f"--force-device-scale-factor={scale}",
+                svg_path.resolve().as_uri(),
+            ],
+            check=True,
+        )
+        return
+
+    raise RuntimeError(
+        "No SVG renderer found. Install cairosvg, rsvg-convert, inkscape, or a Chrome/Chromium binary."
+    )
+
+
+def export_jpg_from_svg(
+    svg_path: Path,
+    jpg_path: Path,
+    width: int,
+    height: int,
+    jpg_quality: int,
+    jpg_scale: float,
+) -> None:
+    try:
+        from PIL import Image
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("Pillow is required for JPG export.") from exc
+
+    jpg_quality = max(1, min(100, jpg_quality))
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        png_path = Path(tmp_dir) / "render.png"
+        render_svg_to_png(svg_path, png_path, width, height, jpg_scale)
+        with Image.open(png_path) as image:
+            rgb = image.convert("RGB")
+            rgb.save(
+                jpg_path,
+                format="JPEG",
+                quality=jpg_quality,
+                optimize=True,
+                progressive=True,
+                subsampling=0,
+            )
 
 
 def print_dropped_boat_log(dropped_boats: list[DroppedBoat]) -> None:
@@ -519,6 +713,7 @@ def main() -> None:
     args = parse_args()
     boats_path = Path(args.boats)
     svg_path = Path(args.svg_out)
+    jpg_path = Path(args.jpg_out) if args.jpg_out else svg_path.with_suffix(".jpg")
 
     boats, dropped_boats = load_boats(boats_path)
     grouped_boats: dict[str, list[Boat]] = defaultdict(list)
@@ -528,9 +723,21 @@ def main() -> None:
         grouped_boats.setdefault(display_type, [])
 
     summary = make_summary(grouped_boats)
-    svg_path.write_text(render_svg(grouped_boats, summary))
+    svg_markup, svg_width, svg_height = render_svg(
+        grouped_boats, summary, condensed=args.condensed
+    )
+    svg_path.write_text(svg_markup)
+    export_jpg_from_svg(
+        svg_path,
+        jpg_path,
+        svg_width,
+        svg_height,
+        args.jpg_quality,
+        args.jpg_scale,
+    )
 
     print(f"Wrote {svg_path}")
+    print(f"Wrote {jpg_path}")
     print_dropped_boat_log(dropped_boats)
 
 
